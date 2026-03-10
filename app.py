@@ -4,6 +4,7 @@ import requests
 import re
 import time
 import io
+from urllib.parse import quote
 from docx import Document
 from docx.shared import Pt
 
@@ -39,38 +40,94 @@ def parse_date_parts(date_parts):
     except Exception:
         return None
 
+def parse_iso_date(date_value):
+    """Parse an ISO date string into a pandas datetime object."""
+    if not date_value:
+        return None
+    return pd.to_datetime(date_value, errors='coerce')
+
+
+def empty_date_result():
+    """Return an empty result row with stable column names."""
+    return {
+        'Published_Print': None,
+        'Published_Online': None,
+        'Issued_Any': None,
+        'Best_Available_Date': None,
+    }
+
+
+def build_date_result(print_date=None, online_date=None, issued_date=None):
+    """Build a consistent result payload and compute the earliest available date."""
+    valid_dates = [d for d in [online_date, print_date, issued_date] if pd.notna(d)]
+    best_date = min(valid_dates) if valid_dates else None
+    return {
+        'Published_Print': print_date,
+        'Published_Online': online_date,
+        'Issued_Any': issued_date,
+        'Best_Available_Date': best_date,
+    }
+
+
+def has_any_date(date_result):
+    """Check whether a result payload contains at least one usable date."""
+    return any(pd.notna(date_result[column]) for column in date_result)
+
+
+def clean_doi(doi):
+    """Normalize DOI values coming from URLs or plain text cells."""
+    return str(doi).replace('https://doi.org/', '').replace('http://doi.org/', '').strip()
+
+
 def fetch_crossref_dates(doi, email):
-    """Fetch specific publication dates from Crossref."""
-    if pd.isna(doi) or not doi:
-        return pd.Series([None, None, None, None])
-    
-    # Clean DOI if it's a URL
-    doi_clean = doi.replace('https://doi.org/', '').replace('http://doi.org/', '').strip()
-    
-    url = f"https://api.crossref.org/works/{doi_clean}"
+    """Fetch publication dates from Crossref."""
+    doi_clean = clean_doi(doi)
     headers = {'User-Agent': f'PaperSorterApp/1.0 (mailto:{email})'}
-    
+    url = f"https://api.crossref.org/works/{quote(doi_clean, safe='')}"
+
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+    data = response.json().get("message", {})
+
+    return build_date_result(
+        print_date=parse_date_parts(data.get("published-print", {}).get("date-parts")),
+        online_date=parse_date_parts(data.get("published-online", {}).get("date-parts")),
+        issued_date=parse_date_parts(data.get("issued", {}).get("date-parts")),
+    )
+
+
+def fetch_openalex_dates(doi, email):
+    """Fallback date lookup using OpenAlex when Crossref does not return usable dates."""
+    doi_clean = clean_doi(doi)
+    headers = {'User-Agent': f'PaperSorterApp/1.0 (mailto:{email})'}
+    url = f"https://api.openalex.org/works/https://doi.org/{quote(doi_clean, safe='')}"
+
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    publication_date = parse_iso_date(data.get("publication_date"))
+
+    return build_date_result(issued_date=publication_date)
+
+
+def fetch_publication_dates(doi, email):
+    """Fetch publication dates with Crossref first, then OpenAlex as fallback."""
+    if pd.isna(doi) or not doi:
+        return empty_date_result()
+
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            data = r.json().get("message", {})
-            
-            # Extract the different date types
-            print_date = parse_date_parts(data.get("published-print", {}).get("date-parts"))
-            online_date = parse_date_parts(data.get("published-online", {}).get("date-parts"))
-            issued_date = parse_date_parts(data.get("issued", {}).get("date-parts"))
-            
-            # Determine the 'Best Date' (earliest available) for accurate sorting
-            valid_dates = [d for d in [online_date, print_date, issued_date] if pd.notna(d)]
-            best_date = min(valid_dates) if valid_dates else None
-            
-            return pd.Series([print_date, online_date, issued_date, best_date])
-        else:
-            return pd.Series([None, None, None, None])
-    except Exception as e:
-        return pd.Series([None, None, None, None])
+        crossref_result = fetch_crossref_dates(doi, email)
+        if has_any_date(crossref_result):
+            return crossref_result
+    except requests.RequestException:
+        pass
+
+    try:
+        return fetch_openalex_dates(doi, email)
+    except requests.RequestException:
+        return empty_date_result()
     finally:
-        time.sleep(0.1) # Respect the rate limit
+        time.sleep(0.1)
 
 def generate_word_doc(df):
     """Generate a sorted Word document in memory."""
@@ -130,7 +187,7 @@ if uploaded_file is not None:
                 doi_pattern = r'(10\.\d{4,9}/[-._;()/:A-Z0-9]+)'
                 
                 # Search across all string columns to find DOIs safely
-                df_strings = df.select_dtypes(include=['object'])
+                df_strings = df.select_dtypes(include=['object', 'string'])
                 extracted = df_strings.apply(lambda col: col.str.extract(doi_pattern, flags=re.IGNORECASE)[0])
                 df['Extracted_DOI'] = extracted.bfill(axis=1).iloc[:, 0]
                 
@@ -144,7 +201,7 @@ if uploaded_file is not None:
                 
                 for i, row in df.iterrows():
                     doi = row['Extracted_DOI']
-                    dates = fetch_crossref_dates(doi, email_input)
+                    dates = fetch_publication_dates(doi, email_input)
                     results.append(dates)
                     
                     # Update progress
@@ -153,7 +210,7 @@ if uploaded_file is not None:
                     status_text.text(f"Processed {i + 1} of {total_rows} records...")
                 
                 # Combine results back to DataFrame
-                date_cols = pd.DataFrame(results, columns=['Published_Print', 'Published_Online', 'Issued_Any', 'Best_Available_Date'])
+                date_cols = pd.DataFrame(results)
                 df = pd.concat([df, date_cols], axis=1)
                 
                 st.success("API processing complete!")
