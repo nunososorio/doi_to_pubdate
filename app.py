@@ -10,7 +10,7 @@ from docx.shared import Pt
 st.set_page_config(page_title="DOI Paper Sorter", layout="wide")
 
 st.title("📚 Paper DOI Extractor & Chronological Sorter")
-st.write("Upload your spreadsheet, extract DOIs, fetch publication dates via Crossref, and download a sorted Word document.")
+st.write("Upload your spreadsheet, extract DOIs, fetch publication dates, and download a sorted Word document.")
 
 # --- 1. User Inputs ---
 col1, col2 = st.columns([2, 1])
