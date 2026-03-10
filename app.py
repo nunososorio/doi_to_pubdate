@@ -43,8 +43,11 @@ def fetch_crossref_dates(doi, email):
     """Fetch specific publication dates from Crossref."""
     if pd.isna(doi) or not doi:
         return pd.Series([None, None, None, None])
-        
-    url = f"https://api.crossref.org/works/{doi}"
+    
+    # Clean DOI if it's a URL
+    doi_clean = doi.replace('https://doi.org/', '').replace('http://doi.org/', '').strip()
+    
+    url = f"https://api.crossref.org/works/{doi_clean}"
     headers = {'User-Agent': f'PaperSorterApp/1.0 (mailto:{email})'}
     
     try:
@@ -62,12 +65,12 @@ def fetch_crossref_dates(doi, email):
             best_date = min(valid_dates) if valid_dates else None
             
             return pd.Series([print_date, online_date, issued_date, best_date])
+        else:
+            return pd.Series([None, None, None, None])
     except Exception as e:
-        pass # Silently handle connection errors to keep the loop running
+        return pd.Series([None, None, None, None])
     finally:
         time.sleep(0.1) # Respect the rate limit
-        
-    return pd.Series([None, None, None, None])
 
 def generate_word_doc(df):
     """Generate a sorted Word document in memory."""
