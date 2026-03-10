@@ -187,3 +187,7 @@ if uploaded_file is not None:
                 
     except Exception as e:
         st.error(f"Error reading file: {e}")
+
+# Footer
+st.divider()
+st.caption("Created by Nuno S. Osório")
